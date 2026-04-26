@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Bubble Breakdown — Prototype</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #ECEAE3;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 24px;
+    color: #1a1a1a;
+  }
+  .frame {
+    width: 408px;
+    height: 364px;
+    background: #F8F8F5;
+    border-radius: 24px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 8px 24px rgba(0,0,0,0.04);
+  }
+  .label {
+    position: absolute;
+    top: 18px;
+    left: 22px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a1a;
+    z-index: 10;
+    letter-spacing: -0.2px;
+    pointer-events: none;
+  }
+  .canvas-wrap {
+    width: 100%;
+    height: 100%;
+  }
+  canvas { display: block; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+  .hint {
+    font-size: 12px;
+    color: #8a8a8a;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+  .reset {
+    background: #1a1a1a;
+    color: #fff;
+    border: none;
+    border-radius: 999px;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .reset:hover { background: #333; }
+  .reset.active { background: #2d6a52; }
+  .note {
+    font-size: 11px;
+    color: #a0a0a0;
+    max-width: 408px;
+    text-align: center;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <div class="label">88 items</div>
+    <div class="canvas-wrap" id="canvas-container"></div>
+  </div>
+  <div class="hint">
+    <span>拖拽气泡 · 重力下落</span>
+    <button class="reset" id="tilt">Enable Tilt</button>
+    <button class="reset" id="reset">Reset</button>
+  </div>
+  <div class="note" id="note"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+  const { Engine, Render, Runner, Bodies, Body, Composite, Mouse, MouseConstraint, Events } = Matter;
+
+  const W = 408;
+  const H = 364;
+
+  const container = document.getElementById('canvas-container');
+
+  let engine, render, runner, bubbles = [];
+
+  // Tilt control state
+  let tiltActive = false;
+  const targetGravity = { x: 0, y: 0.9 };
+  const DEFAULT_GRAVITY = { x: 0, y: 0.9 };
+
+  function handleOrientation(e) {
+    if (e.beta == null || e.gamma == null) return;
+    // gamma: -90..90, left/right tilt → horizontal gravity component
+    // beta: -180..180, front/back tilt → vertical gravity component
+    const G = 1.1; // gravity magnitude — slightly stronger than default for responsive feel
+    let gx = Math.sin(e.gamma * Math.PI / 180) * G;
+    let gy = Math.sin(e.beta * Math.PI / 180) * G;
+    // clamp to avoid extremes
+    targetGravity.x = Math.max(-1.5, Math.min(1.5, gx));
+    targetGravity.y = Math.max(-1.5, Math.min(1.5, gy));
+  }
+
+  // Bubble config — radius scaled visually from percentage, colors match design
+  const bubbleConfigs = [
+    { label: 'HDPE',  percent: '30%', radius: 72, color: '#A6C2BA', textColor: '#3F4F4A' },
+    { label: 'Glass', percent: '31%', radius: 80, color: '#E0DCD2', textColor: '#7A7464' },
+    { label: 'PET',   percent: '21%', radius: 54, color: '#C2D2CD', textColor: '#4F5E5A' },
+    { label: 'Metal', percent: '18%', radius: 60, color: '#D5D0C5', textColor: '#7A7464' },
+  ];
+
+  function init() {
+    if (engine) {
+      Render.stop(render);
+      Runner.stop(runner);
+      Composite.clear(engine.world);
+      Engine.clear(engine);
+      render.canvas.remove();
+      render.textures = {};
+    }
+
+    engine = Engine.create({
+      positionIterations: 12,   // default 6 — smoother collision resolution
+      velocityIterations: 10,   // default 4 — less jitter when bodies push each other
+      constraintIterations: 4   // default 2 — smoother mouse drag
+    });
+    engine.gravity.y = 0.9;
+
+    render = Render.create({
+      element: container,
+      engine: engine,
+      options: {
+        width: W,
+        height: H,
+        wireframes: false,
+        background: 'transparent',
+        pixelRatio: window.devicePixelRatio || 1,
+      }
+    });
+
+    // Walls — invisible boundaries (thicker to prevent tunneling)
+    const wallOpts = { isStatic: true, render: { visible: false }, friction: 0.3 };
+    const ground = Bodies.rectangle(W / 2, H + 50, W + 200, 100, wallOpts);
+    const leftWall = Bodies.rectangle(-50, H / 2, 100, H + 200, wallOpts);
+    const rightWall = Bodies.rectangle(W + 50, H / 2, 100, H + 200, wallOpts);
+
+    // Ceiling — initially disabled so bubbles can drop in, enabled after entry
+    const ceiling = Bodies.rectangle(W / 2, -50, W + 200, 100, {
+      isStatic: true,
+      render: { visible: false },
+      friction: 0.3,
+      collisionFilter: { mask: 0x0000 } // disabled initially
+    });
+
+    Composite.add(engine.world, [ground, leftWall, rightWall, ceiling]);
+
+    // Create bubbles with staggered drop positions
+    const dropPositions = [
+      { x: W * 0.25, y: -100 },
+      { x: W * 0.65, y: -220 },
+      { x: W * 0.45, y: -360 },
+      { x: W * 0.80, y: -500 },
+    ];
+
+    bubbles = bubbleConfigs.map((cfg, i) => {
+      const pos = dropPositions[i];
+      const body = Bodies.circle(pos.x, pos.y, cfg.radius, {
+        restitution: 0.35,         // slight bouncing, lower = less bounce-back jitter
+        friction: 0.08,
+        frictionAir: 0.018,        // a touch more air drag = settles faster
+        density: 0.004,            // heavier — much more stable when shoved by dragged ball
+        slop: 0.04,                // a bit of slop helps absorb micro-penetrations
+        render: {
+          fillStyle: cfg.color,
+        }
+      });
+      body.bubbleConfig = cfg;
+      return body;
+    });
+
+    Composite.add(engine.world, bubbles);
+
+    // Mouse — drag interaction
+    const mouse = Mouse.create(render.canvas);
+    // Fix retina scaling for mouse
+    mouse.pixelRatio = window.devicePixelRatio || 1;
+
+    const mouseConstraint = MouseConstraint.create(engine, {
+      mouse: mouse,
+      constraint: {
+        stiffness: 0.08,    // softer pull — was 0.18, was fighting collisions too hard
+        damping: 0.2,       // more damping = less overshoot/oscillation
+        render: { visible: false }
+      }
+    });
+    Composite.add(engine.world, mouseConstraint);
+    render.mouse = mouse;
+
+    // Keep bubbles inside the frame:
+    // 1) once a bubble fully enters, mark it and clamp its position thereafter
+    // 2) once ALL bubbles have entered, enable the ceiling
+    Events.on(engine, 'beforeUpdate', () => {
+      // smooth gravity toward target (low-pass filter — kills sensor jitter)
+      engine.gravity.x += (targetGravity.x - engine.gravity.x) * 0.1;
+      engine.gravity.y += (targetGravity.y - engine.gravity.y) * 0.1;
+
+      const MAX_V = 35; // cap velocity to prevent tunneling on fast drag release
+      const draggedBody = mouseConstraint.body;
+      let allEntered = true;
+
+      bubbles.forEach(body => {
+        const r = body.bubbleConfig.radius;
+
+        // velocity cap — skip the body currently being dragged so mouse stays responsive
+        if (body !== draggedBody) {
+          const vx = body.velocity.x;
+          const vy = body.velocity.y;
+          if (Math.abs(vx) > MAX_V || Math.abs(vy) > MAX_V) {
+            Body.setVelocity(body, {
+              x: Math.max(-MAX_V, Math.min(MAX_V, vx)),
+              y: Math.max(-MAX_V, Math.min(MAX_V, vy))
+            });
+          }
+        }
+
+        // mark as entered once fully inside top of frame
+        if (!body.hasEntered && body.position.y > r + 5) {
+          body.hasEntered = true;
+        }
+        if (!body.hasEntered) allEntered = false;
+
+        // clamp position once entered (safety net)
+        if (body.hasEntered) {
+          let { x, y } = body.position;
+          let nvx = body.velocity.x;
+          let nvy = body.velocity.y;
+          let needClamp = false;
+
+          if (x < r)         { x = r;       nvx = Math.abs(nvx) * 0.4; needClamp = true; }
+          if (x > W - r)     { x = W - r;   nvx = -Math.abs(nvx) * 0.4; needClamp = true; }
+          if (y < r)         { y = r;       nvy = Math.abs(nvy) * 0.4; needClamp = true; }
+          if (y > H - r)     { y = H - r;   nvy = -Math.abs(nvy) * 0.4; needClamp = true; }
+
+          if (needClamp) {
+            Body.setPosition(body, { x, y });
+            Body.setVelocity(body, { x: nvx, y: nvy });
+          }
+        }
+      });
+
+      // enable ceiling once everyone has dropped in
+      if (allEntered && ceiling.collisionFilter.mask === 0x0000) {
+        ceiling.collisionFilter.mask = 0xFFFFFFFF;
+      }
+    });
+
+    // Custom rendering — draw labels on top of circles
+    Events.on(render, 'afterRender', () => {
+      const ctx = render.context;
+      bubbles.forEach(body => {
+        const cfg = body.bubbleConfig;
+        const { x, y } = body.position;
+        const angle = body.angle;
+
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(angle);
+
+        ctx.fillStyle = cfg.textColor;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+
+        // Label
+        const labelSize = Math.max(13, cfg.radius * 0.26);
+        ctx.font = `600 ${labelSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+        ctx.fillText(cfg.label, 0, -labelSize * 0.35);
+
+        // Percent
+        const pctSize = Math.max(11, cfg.radius * 0.2);
+        ctx.font = `500 ${pctSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+        ctx.globalAlpha = 0.75;
+        ctx.fillText(cfg.percent, 0, labelSize * 0.65);
+        ctx.globalAlpha = 1;
+
+        ctx.restore();
+      });
+    });
+
+    Render.run(render);
+    runner = Runner.create();
+    Runner.run(runner, engine);
+  }
+
+  init();
+
+  document.getElementById('reset').addEventListener('click', init);
+
+  // Tilt control — uses DeviceOrientationEvent, requires HTTPS + user gesture on iOS
+  const tiltBtn = document.getElementById('tilt');
+  const noteEl = document.getElementById('note');
+
+  function setNote(msg) { noteEl.textContent = msg; }
+
+  // Show different hint depending on context
+  if (window.location.protocol === 'file:') {
+    setNote('提示:从本地文件直接打开时,手机传感器无法启用。请部署到 HTTPS(GitHub Pages / Netlify / Vercel)后在手机访问。');
+  } else if (!('DeviceOrientationEvent' in window)) {
+    setNote('当前浏览器不支持设备方向传感器。');
+  } else {
+    setNote('在手机上访问此页,点 Enable Tilt 后倾斜手机即可让球随重力滚动。');
+  }
+
+  tiltBtn.addEventListener('click', async () => {
+    if (tiltActive) {
+      // Disable tilt — restore default gravity
+      window.removeEventListener('deviceorientation', handleOrientation);
+      tiltActive = false;
+      tiltBtn.textContent = 'Enable Tilt';
+      tiltBtn.classList.remove('active');
+      targetGravity.x = DEFAULT_GRAVITY.x;
+      targetGravity.y = DEFAULT_GRAVITY.y;
+      return;
+    }
+
+    try {
+      // iOS 13+ requires explicit permission via user gesture
+      if (typeof DeviceOrientationEvent !== 'undefined' &&
+          typeof DeviceOrientationEvent.requestPermission === 'function') {
+        const result = await DeviceOrientationEvent.requestPermission();
+        if (result !== 'granted') {
+          setNote('未授权传感器访问。请在 iOS 设置 → Safari → 动作与方向访问 中允许。');
+          return;
+        }
+      }
+      window.addEventListener('deviceorientation', handleOrientation);
+      tiltActive = true;
+      tiltBtn.textContent = 'Disable Tilt';
+      tiltBtn.classList.add('active');
+      setNote('Tilt 已启用 · 倾斜手机让球随重力滚动');
+    } catch (err) {
+      setNote('启用失败:' + err.message + ' (确认页面通过 HTTPS 访问)');
+    }
+  });
+</script>
+</body>
+</html>
