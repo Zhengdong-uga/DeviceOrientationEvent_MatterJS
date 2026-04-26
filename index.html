@@ -104,14 +104,14 @@
 
   function handleOrientation(e) {
     if (e.beta == null || e.gamma == null) return;
-    // gamma: -90..90, left/right tilt → horizontal gravity component
+    // gamma: -90..90, left/right tilt → horizontal gravity component (sign flipped to match intuitive direction)
     // beta: -180..180, front/back tilt → vertical gravity component
-    const G = 1.1; // gravity magnitude — slightly stronger than default for responsive feel
-    let gx = Math.sin(e.gamma * Math.PI / 180) * G;
+    const G = 1.8; // gravity magnitude — stronger so balls move quickly when tilted
+    let gx = -Math.sin(e.gamma * Math.PI / 180) * G;  // negative sign: tilt left → balls roll left
     let gy = Math.sin(e.beta * Math.PI / 180) * G;
-    // clamp to avoid extremes
-    targetGravity.x = Math.max(-1.5, Math.min(1.5, gx));
-    targetGravity.y = Math.max(-1.5, Math.min(1.5, gy));
+    // clamp wider so steep tilts feel powerful
+    targetGravity.x = Math.max(-2.5, Math.min(2.5, gx));
+    targetGravity.y = Math.max(-2.5, Math.min(2.5, gy));
   }
 
   // Bubble config — radius scaled visually from percentage, colors match design
@@ -213,11 +213,11 @@
     // 1) once a bubble fully enters, mark it and clamp its position thereafter
     // 2) once ALL bubbles have entered, enable the ceiling
     Events.on(engine, 'beforeUpdate', () => {
-      // smooth gravity toward target (low-pass filter — kills sensor jitter)
-      engine.gravity.x += (targetGravity.x - engine.gravity.x) * 0.1;
-      engine.gravity.y += (targetGravity.y - engine.gravity.y) * 0.1;
+      // smooth gravity toward target — higher factor = snappier response to tilt
+      engine.gravity.x += (targetGravity.x - engine.gravity.x) * 0.2;
+      engine.gravity.y += (targetGravity.y - engine.gravity.y) * 0.2;
 
-      const MAX_V = 35; // cap velocity to prevent tunneling on fast drag release
+      const MAX_V = 60; // higher cap so balls can roll fast under steep tilt
       const draggedBody = mouseConstraint.body;
       let allEntered = true;
 
